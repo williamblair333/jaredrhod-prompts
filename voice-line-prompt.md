@@ -1,6 +1,6 @@
 # The Voice Line
 
-Paste this whole prompt into Claude Code. Your agent builds a voice conversation system: hold a key, talk to your agent out loud, release, and it answers through your speakers in a real voice. Type instead whenever you want, same conversation. Everything runs local, $0 on a Claude subscription, and your agent will offer you a choice: the free local voice, or any voice you like from ElevenLabs if you want the premium sound.
+Paste this whole prompt into Claude Code. Your agent builds a voice conversation system: hold a key, talk to your agent out loud, release, and it answers through your speakers in a real voice. Type instead whenever you want, same conversation. Everything runs local, $0 on a Claude subscription, and your agent will offer you a choice: the free local voice, or any voice you like from ElevenLabs if you want the premium sound. This spec now carries the exact speed and stability fixes out of my own build, the one you see answering in about a second on my lives.
 
 ---
 
@@ -35,7 +35,8 @@ Create the project at `~/voice-line/` with a uv-managed Python 3.12 environment:
 - `ptt.py` the global hold-to-talk key listener
 - `ducking.py` optional Spotify ducking
 - `signals.py` the visualizer signal bus (spec below)
-- `run-voice-line.sh` launcher
+- `vlog.py` a plain session log: what I said, what it said, interrupts, TTS fallbacks. When something misbehaves we read the log instead of guessing.
+- `run-voice-line.sh` launcher. It kills any already-running copy of the voice line before starting: two live voice processes both hear the mic and both answer, and it sounds haunted.
 
 Python packages: sounddevice, webrtcvad, numpy, pynput, claude-agent-sdk, httpx. Pin setuptools below 81 because webrtcvad needs pkg_resources. You also need the ffmpeg binary available.
 
@@ -60,15 +61,19 @@ Also build a legacy open-mic mode behind an `--open-mic` flag: webrtcvad endpoin
 ## The brain
 
 - One warm ClaudeSDKClient per voice session, created at launch. Warm turns are fast; the first turn pays a prompt-cache toll of several seconds, so hide it behind a spoken greeting by firing a warmup query at startup.
+- Pin the brain's model to the fast tier and pass the FULL model id, today that is `claude-sonnet-5`. Do not let the session inherit my terminal default: the big deep-work models make you wait noticeably longer for the first word of every reply, and they burn through a subscription's usage doing it. This one setting is most of the speed difference people ask me about. GOTCHA: never pass a bare alias like "sonnet". The SDK resolves aliases through its own bundled CLI and can silently land on an older model, so pass the full id and verify the resolved model in the SDK's init message. Add a launch flag that swaps in a bigger model for the rare session where I want deep thinking over speed.
 - Set the session cwd to the project folder whose CLAUDE.md defines your identity, so the voice session is the same assistant as my terminal sessions.
 - Use the system prompt preset with an appended spoken-discipline block: short conversational sentences, no markdown, no code blocks, no lists read aloud, write for the ear. TTS performs punctuation, so dull text is dull audio. After the first sentence, ship sentences in two-sentence breaths, since lone short sentences sound flat.
 - Stream partial messages. Chunk into sentences and hand each completed sentence to the mouth immediately.
 - CRITICAL: flush the sentence buffer when a content block stops. If you only flush on sentence-ending punctuation, pre-tool filler like "On it, checking now" sits silent through the whole tool run and then plays glued to the answer.
+- CRITICAL, this is the bug behind every voice build that "stops responding after a few turns": the SDK client has ONE shared message stream, and receive_response() stops at the first ResultMessage it sees, with no pairing between a question and its answer. When an interrupt cancels your reader mid-turn, the dead turn's leftover messages, including its ResultMessage, stay buffered in the pipe. The next question pairs with that stale leftover and yields nothing, and every question after that gets the answer to the PREVIOUS question, for the rest of the session. The fix: after any interrupted turn and before the next query, call the client's interrupt(), then drain the message stream through the stale ResultMessage with a timeout, and if the drain cannot realign, rebuild the session rather than run desynced.
 - Quit phrases end the session: "goodbye", "end voice mode", "hang up". Ctrl-C also works.
 
 ## The mouth
 
 - A queue of sentences, synthesized one at a time, played back to back, cancellable mid-stream (interrupt = clear queue + stop playback now).
+- Open ONE long-lived output stream and reuse it for every sentence for the life of the process. A fresh stream per sentence gives you a blip or a beat of dead air at every sentence boundary on plenty of audio setups (USB interfaces, Bluetooth, streaming mixers that latch onto each new stream late). On interrupt, stop feeding the stream and pad about 150ms of silence, do not close and reopen it.
+- Buffer about 0.75 seconds of synthesized audio before a sentence starts playing, so a slower machine never underruns into slow-motion garble.
 - **The voice is my choice. Before you build the mouth, ask me:** free local voice (Kokoro, the default, $0 forever), or a higher quality ElevenLabs voice using my own ElevenLabs API key. If I pick ElevenLabs, walk me through creating the key, point me at their voice library so I can pick ANY voice I like (the voice id is one setting in the code), store the key in an ELEVENLABS_API_KEY env var (never hardcode it), and keep Kokoro wired in as the automatic fallback so if ElevenLabs is down or the key runs out of credits the voice degrades instead of going mute.
 - Kokoro path: POST the sentence, get raw PCM int16 24kHz mono, play through sounddevice.
 - ElevenLabs path, hard-won audio doctrine: fetch mp3_44100_128 and decode locally with ffmpeg (raw PCM at 44.1k needs their Pro tier, and the mp3 decode hides inside network wait). Use the turbo model with stability 0.5 and similarity 0.75. Do not use the multilingual model for English and do not set style above 0, both make delivery slow and dull. Their website voice previews are mastered demo clips, raw API output never matches them, so master locally with an ffmpeg chain: presence boost around 3.2kHz, a little low shelf around 140Hz, gentle compression, a limiter.
@@ -97,7 +102,9 @@ State transitions: key press writes listening, key release writes thinking, firs
 1. Both local servers respond.
 2. A full turn end to end: hold, speak, release, hear the reply.
 3. Interrupt works mid-reply.
-4. A tool-using turn speaks filler within a couple of seconds, then the answer.
-5. Nothing plays twice and the mic never hears the speakers.
+4. Interrupt a reply, then ask something new, and confirm the answer matches the NEW question. Repeat it a few times: this is the stream drain proving itself, and skipping this check is how builds ship with the off-by-one bug.
+5. A tool-using turn speaks filler within a couple of seconds, then the answer.
+6. Launch a second copy and confirm the first one dies. One body, one mouth.
+7. Nothing plays twice and the mic never hears the speakers.
 
 Then show me the launch command and a one-page cheat sheet of the controls.
