@@ -31,6 +31,6 @@ Free to use, and always will be. If this helped you out, you can buy me a coffee
 
 ## License
 
-[CC BY-NC-SA 4.0](LICENSE): free to use, share, and build on with credit. Not for resale.
+[CC BY-SA 4.0](LICENSE): free to use, share, and build on, including commercially. Credit me, and remixes stay under the same license.
 
 In plain English: use it for whatever you want. Just don't repackage it and sell it, or reskin it, modify it a little, and sell that. It's free for a reason, and no one is allowed to sell my stuff.
